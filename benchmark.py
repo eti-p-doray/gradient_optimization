@@ -1,11 +1,10 @@
 import tensorflow as tf
 
-gpus = tf.config.experimental.list_physical_devices('GPU')
-tf.config.experimental.set_virtual_device_configuration(gpus[0],
-       [tf.config.experimental.VirtualDeviceConfiguration(memory_limit=2048)])
+physical_devices = tf.config.experimental.list_physical_devices('GPU')
+tf.config.experimental.set_memory_growth(physical_devices[0], True)
 
 
-class DefaultTrainEngine():
+class DefaultEngine():
   def __init__(self, model, loss, accuracy, optimizer):
     self.optimizer = optimizer
     self.model = model
@@ -14,7 +13,7 @@ class DefaultTrainEngine():
 
     self.loss_metric = tf.keras.metrics.Mean(name='loss')
 
-  def reset_states():
+  def reset_states(self):
     self.loss_metric.reset_states()
     self.accuracy.reset_states()
 
@@ -29,7 +28,7 @@ class DefaultTrainEngine():
     self.optimizer.apply_gradients(zip(gradients, self.model.trainable_weights))
 
   @tf.function
-  def train_step(self, x, labels):
+  def test_step(self, x, labels):
     # training=False is only needed if there are layers with different
     # behavior during training versus inference (e.g. Dropout).
     predictions = self.model(x, training=False)
@@ -53,25 +52,24 @@ model = tf.keras.applications.ResNet50(input_shape=x_train.shape[1:], weights=No
 optimizer = tf.keras.optimizers.SGD(learning_rate=0.01, momentum=0.9)
 loss_fn = tf.keras.losses.SparseCategoricalCrossentropy(from_logits=True)
 
-train_accuracy = tf.keras.metrics.SparseCategoricalAccuracy(name='train_accuracy')
-test_accuracy = tf.keras.metrics.SparseCategoricalAccuracy(name='test_accuracy')
+accuracy = tf.keras.metrics.SparseCategoricalAccuracy(name='accuracy')
 
-engine = DefaultTrainEngine(model, loss_fn, train_accuracy, optimizer)
+engine = DefaultEngine(model, loss_fn, accuracy, optimizer)
 
 for epoch in range(EPOCHS):
 
   engine.reset_states()
   for x, labels in train_ds:
-    engine.step(x, labels)
+    engine.train_step(x, labels)
     print(
       f'Loss: {engine.loss_metric.result()}, '
-      f'Accuracy: {train_accuracy.result() * 100}, '
+      f'Accuracy: {accuracy.result() * 100}, '
     )
 
   engine.reset_states()
   for x, labels in test_ds:
-    test_engine.step(x, labels)
+    engine.test_step(x, labels)
   print(
     f'Loss: {engine.loss_metric.result()}, '
-    f'Accuracy: {engine.result() * 100}, '
+    f'Accuracy: {accuracy.result() * 100}, '
   )
