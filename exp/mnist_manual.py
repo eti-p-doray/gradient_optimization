@@ -3,6 +3,8 @@ import tensorflow as tf
 from tensorflow.keras.layers import Dense, Flatten, Conv2D
 from tensorflow.keras import Model
 
+import numpy as np
+
 mnist = tf.keras.datasets.mnist
 
 (x_train, y_train), (x_test, y_test) = mnist.load_data()
@@ -19,53 +21,47 @@ test_ds = tf.data.Dataset.from_tensor_slices((x_test, y_test)).batch(32)
 
 normal_initializer = tf.random_normal_initializer()
 
-class MyModel(Model):
+class MyModel():
   def __init__(self):
-    super(MyModel, self).__init__()
-
     #self.conv1 = Conv2D(32, 3, activation='relu')
-    self.flatten = Flatten()
-    self.d1 = Dense(200, activation='relu')
-    self.d2 = Dense(200, activation='relu')
-    self.d3 = Dense(10)
+    self.weight_initializer = tf.keras.initializers.GlorotUniform()
+    self.bias_initializer = tf.zeros_initializer()
 
-  def call(self, x):
+    self.flatten = Flatten()
+    #self.d1_a = tf.keras.layers.ReLU()
+    #self.d2_a = tf.keras.layers.ReLU()
+
+  def build(self, input_shape):
+    self.d1_w = tf.Variable(self.weight_initializer(shape=[np.prod(input_shape[1:], dtype=int), 200]))
+    self.d1_b = tf.Variable(self.bias_initializer(shape=[200]))
+
+    self.d2_w = tf.Variable(self.weight_initializer(shape=[200, 200]))
+    self.d2_b = tf.Variable(self.bias_initializer(shape=[200]))
+
+    self.d3_w = tf.Variable(self.weight_initializer(shape=[200, 10]))
+    self.d3_b = tf.Variable(self.bias_initializer(shape=[10]))
+
+  def call(self, x, training = False):
     #x = self.conv1(x)
     x = self.flatten(x)
-    x = self.d1(x)
-    x = self.d2(x)
-    return self.d3(x)
+    x = tf.nn.relu( tf.tensordot(x, self.d1_w, [[1], [0]]) + self.d1_b )
+    x = tf.nn.relu( tf.tensordot(x, self.d2_w, [[1], [0]]) + self.d2_b )
+    x = tf.tensordot(x, self.d3_w, [[1], [0]]) + self.d3_b
+    return x
+
+  def trainable_variables(self):
+    return [self.d1_w, self.d1_b, self.d2_w, self.d2_b, self.d3_w, self.d3_b]
 
 # Create an instance of the model
 N = 30
 model = MyModel()
+model.build(x_train.shape)
 
 loss_object = tf.keras.losses.SparseCategoricalCrossentropy(from_logits=True)
 
 lr = 0.1
 momentum=0.5
 optimizer = tf.keras.optimizers.SGD(learning_rate=lr, momentum=momentum)
-
-class MovingAverage(tf.keras.metrics.Metric):
-  def __init__(self, name='moving_average', shape=(), decay=0.999, **kwargs):
-    super(MovingAverage, self).__init__(name=name, **kwargs)
-    self.decay = decay
-    self.avg = self.add_weight(name='avg', shape=shape, initializer='zeros')
-
-  def update_state(self, value):
-    value = tf.cast(value, dtype=tf.float32)
-    self.avg.assign(self.avg * self.decay + (1.0 - self.decay) * value)
-
-  def result(self):
-    return self.avg
-
-#train_gradients_norm = tf.keras.metrics.Mean(name='train_gradients_norm')
-#magnitude_change = tf.keras.metrics.Mean(name='magnitude_change')
-#predict_gradients_norm = tf.keras.metrics.Mean(name='predict_gradients_norm')
-gradient_norm = MovingAverage(decay=0.95)
-magnitude_change = MovingAverage(decay=0.95)
-
-baseline_avg = MovingAverage(shape=(199210), decay=0.999)
 
 train_loss = tf.keras.metrics.Mean(name='train_loss')
 train_accuracy = tf.keras.metrics.SparseCategoricalAccuracy(name='train_accuracy')
@@ -79,21 +75,12 @@ def train_step(images, labels):
   with tf.GradientTape() as tape:
     # training=True is only needed if there are layers with different
     # behavior during training versus inference (e.g. Dropout).
-    predictions = model(images, training=True)
+    predictions = model.call(images, training=True)
     loss = loss_object(labels, predictions)
-  gradients = tape.gradient(loss, model.trainable_variables)
+  gradients = tape.gradient(loss, model.trainable_variables())
   training_gradients = gradients
 
-  gradient_vec = tf.concat([tf.reshape(gradient, [-1]) for gradient in training_gradients], axis=0)
-  variables_vec = tf.concat([tf.reshape(trainable, [-1]) for trainable in model.trainable_variables], axis=0)
-  baseline_avg(variables_vec)
-  Or = 0.5 * lr * (1.0+momentum) * tf.tensordot(gradient_vec, gradient_vec, 1)
-  Ol = -tf.tensordot(variables_vec, -gradient_vec, 1)
-
-  gradient_norm(Or)
-  magnitude_change(Ol)
-
-  optimizer.apply_gradients(zip(training_gradients, model.trainable_variables))
+  optimizer.apply_gradients(zip(training_gradients, model.trainable_variables()))
 
   train_loss(loss)
   train_accuracy(labels, predictions)
@@ -102,7 +89,7 @@ def train_step(images, labels):
 def test_step(images, labels):
   # training=False is only needed if there are layers with different
   # behavior during training versus inference (e.g. Dropout).
-  predictions = model(images, training=False)
+  predictions = model.call(images, training=False)
   t_loss = loss_object(labels, predictions)
 
   test_loss(t_loss)
@@ -123,11 +110,6 @@ for epoch in range(EPOCHS):
     print(
       f'Loss: {train_loss.result()}, '
       f'Accuracy: {train_accuracy.result() * 100}, '
-    )
-    print(
-      f'Gradient Norm: {gradient_norm.result()}, '
-      f'Magnitude Change: {magnitude_change.result()}, '
-      f'Relation: {tf.abs(magnitude_change.result() / gradient_norm.result() - 1.0)}, '
     )
 
   for test_images, test_labels in test_ds:
