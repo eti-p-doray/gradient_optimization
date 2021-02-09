@@ -176,11 +176,11 @@ class EnsembleBlockOptimizer:
   def compress_information():
     pass
 
-def initialize_information(shape, batch_size):
+def initialize_information(shape):
   fan_in, fan_out = compute_fans(shape)
   return tf.Variable((fan_in + fan_out) / 2.0)
   
-block_information = [initialize_information(var.shape, batch_size) for var in model.trainable_variables]
+block_information = [initialize_information(var.shape) for var in model.trainable_variables]
 print(block_information)
 @tf.function
 def train_step(images, labels):
@@ -190,28 +190,22 @@ def train_step(images, labels):
     predictions = model(images, training=True)
     loss = loss_object(labels, predictions)
 
-  samples = orthgonal_initializer([images.shape[0], 10])
+  samples = orthgonal_initializer(predictions.shape)
   hessian = tf.math.sigmoid(predictions) * (1.0-tf.math.sigmoid(predictions))
-  block_gradient_samples = tape.gradient(predictions, model.trainable_variables, output_gradients=tf.sqrt(hessian) * samples)
+  block_gradient_samples = tape.gradient(predictions, model.trainable_weights, output_gradients=tf.sqrt(hessian) * samples)
 
-  gradients = tape.gradient(loss, model.trainable_variables)
+  gradients = tape.gradient(loss, model.trainable_weights)
   train_loss(loss)
   train_accuracy(labels, predictions)
 
   #block_gradient_samples = sample_gauss_newton(images)
-  for gn, information, var, grad in zip(block_gradient_samples, block_information, model.trainable_variables, gradients):
+  for gn, information, var, grad in zip(block_gradient_samples, block_information, model.trainable_weights, gradients):
     gn = tf.reshape(gn, [1,-1])
     embedding = tf.tensordot(gn, tf.transpose(gn), axes=1)
-    #s = tf.linalg.svd(embedding, compute_uv=False)
-    #print(s, tf.linalg.diag_part(embedding))
-    #print(tf.reduce_sum(s), tf.linalg.trace(embedding))
-    #print(tf.reduce_sum(s)/tf.cast(tf.size(var), tf.float32))
-    information.assign_add(tf.linalg.trace(embedding) * images.shape[0]/tf.cast(tf.size(var), tf.float32))
-    #print(information, 1.0/information)
-    #print(var.shape, grad.shape)
+    information.assign_add(tf.linalg.trace(embedding)/tf.cast(tf.size(var), tf.float32))
     var.assign_add(-grad * images.shape[0] / information)
-    fan_in, fan_out = compute_fans(var.shape)
-    information.assign(information / (1.0 + information * 0.0001 / (fan_in+fan_out)))
+    #fan_in, fan_out = compute_fans(var.shape)
+    #information.assign(information / (1.0 + information * 0.0001 / (fan_in+fan_out)))
   print(block_information)
 
   #optimizer.apply_gradients(zip(gradients, model.trainable_variables))
