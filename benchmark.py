@@ -423,8 +423,8 @@ def main():
   #x_test = x_test[..., tf.newaxis].astype("float32")
 
   train_ds = tf.data.Dataset.from_tensor_slices(
-      (x_train, y_train)).shuffle(10000).batch(args.batch_size).prefetch(tf.data.AUTOTUNE)
-  test_ds = tf.data.Dataset.from_tensor_slices((x_test, y_test)).batch(args.batch_size).prefetch(tf.data.AUTOTUNE)
+      (x_train, y_train)).shuffle(10000).batch(args.batch_size).prefetch(1)
+  test_ds = tf.data.Dataset.from_tensor_slices((x_test, y_test)).batch(args.batch_size).prefetch(1)
 
   loss_fn = tf.keras.losses.SparseCategoricalCrossentropy(from_logits=True, reduction=tf.keras.losses.Reduction.SUM_OVER_BATCH_SIZE)
   hessian_fn = crossentropy_hessian_fn
