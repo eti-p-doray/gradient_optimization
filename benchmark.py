@@ -1,10 +1,12 @@
 import tensorflow as tf
-from tensorboard.plugins.hparams import api as hp
 from datetime import datetime
+import argparse
 import math
+import json
+import wandb
 
-physical_devices = tf.config.experimental.list_physical_devices('GPU')
-tf.config.experimental.set_memory_growth(physical_devices[0], True)
+#physical_devices = tf.config.experimental.list_physical_devices('GPU')
+#tf.config.experimental.set_memory_growth(physical_devices[0], True)
 
 class BaseEngine():
   def __init__(self, model, loss_fn, accuracy, optimizer):
@@ -29,7 +31,7 @@ class BaseEngine():
     self.loss_metric(loss)
     self.accuracy(labels, predictions)
 
-  def summarize(self):
+  def summarize(self, step):
     pass
 
 class DefaultEngine(BaseEngine):
@@ -91,10 +93,10 @@ class FisherBlockScalarOptimizer():
       weight.assign_add(-gradient * size / norm)
       norm.assign(norm * self.fading)
 
-  def summarize(self):
+  def summarize(self, step):
     for norm in self.block_norm:
-      tf.summary.scalar("block-norm-" + norm.name, norm)
-      tf.summary.scalar("block-lr-" + norm.name, 1.0 / norm)
+      wandb.log({"block-norm-" + norm.name: norm}, step=step)
+      wandb.log({"block-lr-" + norm.name: 1.0 / norm}, step=step)
 
 @tf.function
 def reshape(weight, shape):
@@ -128,8 +130,8 @@ class FisherBlockSpectralOptimizer():
   @tf.function
   def augment(self, riemann_metric, fisher_vectors, samples):
     #print(riemann_metric.shape, fisher_vectors.shape, samples.shape)
-    print(tf.tensordot(vec(fisher_vectors), vec(fisher_vectors), [[1], [1]]))
-    print("riemann_metric", riemann_metric)
+    #print(tf.tensordot(vec(fisher_vectors), vec(fisher_vectors), [[1], [1]]))
+    #print("riemann_metric", riemann_metric)
     B = tf.tensordot(vec(fisher_vectors), vec(samples), [[1], [1]])
     D = tf.tensordot(vec(samples), vec(samples), [[1], [1]])
     #print('BD', B, D)
@@ -137,8 +139,8 @@ class FisherBlockSpectralOptimizer():
     augmented_riemann_metric = tf.concat([tf.concat([riemann_metric, tf.transpose(B)], 0), tf.concat([B, D], 0)], 1)
     #print('augmented_riemann_metric', augmented_riemann_metric)
     augmented_fisher_vector = tf.concat([fisher_vectors, samples], 0)
-    print(tf.tensordot(vec(augmented_fisher_vector), vec(augmented_fisher_vector), [[1], [1]]))
-    print("augmented_riemann_metric", augmented_riemann_metric)
+    #print(tf.tensordot(vec(augmented_fisher_vector), vec(augmented_fisher_vector), [[1], [1]]))
+    #print("augmented_riemann_metric", augmented_riemann_metric)
     return augmented_riemann_metric, augmented_fisher_vector
 
   @tf.function
@@ -159,8 +161,8 @@ class FisherBlockSpectralOptimizer():
     #print(tf.expand_dims(s[0:rank], axis=0).shape)
     #print('riemann_metric', riemann_metric)
     compressed_riemann_metric = tf.tensordot(transform * tf.expand_dims(s[0:rank], axis=0), tf.transpose(transform), axes=1)
-    print(tf.tensordot(vec(compressed_fisher_vectors), vec(compressed_fisher_vectors), [[1], [1]]))
-    print("compressed_riemann_metric", compressed_riemann_metric)
+    #print(tf.tensordot(vec(compressed_fisher_vectors), vec(compressed_fisher_vectors), [[1], [1]]))
+    #print("compressed_riemann_metric", compressed_riemann_metric)
     #print('compressed_riemann_metric', compressed_riemann_metric)
     return compressed_riemann_metric, compressed_fisher_vectors, metric_spill
 
@@ -190,10 +192,10 @@ class FisherBlockSpectralOptimizer():
 
       weight.assign_add((-gradient + natural_gradient) * batch_size / norm)
 
-  def summarize(self):
+  def summarize(self, step):
     for norm in self.block_norm:
-      tf.summary.scalar("block-norm-" + norm.name, norm)
-      tf.summary.scalar("block-lr-" + norm.name, 1.0 / norm)
+      wandb.log({"block-norm-" + norm.name: norm}, step=step)
+      wandb.log({"block-lr-" + norm.name: 1.0 / norm}, step=step)
 
 loss_fn2 = tf.keras.losses.SparseCategoricalCrossentropy(from_logits=False, reduction=tf.keras.losses.Reduction.SUM_OVER_BATCH_SIZE)
 
@@ -224,8 +226,8 @@ class BatchFisherEngine(BaseEngine):
     self.accuracy(labels, predictions)
     self.loss_metric(loss)
 
-  def summarize(self):
-    self.optimizer.summarize()
+  def summarize(self, step):
+    self.optimizer.summarize(step)
 
 class FisherEngine(BaseEngine):
   def __init__(self, model, loss_fn, hessian_fn, accuracy, optimizer):
@@ -244,9 +246,9 @@ class FisherEngine(BaseEngine):
 
     def backward_acc(sample_and_x):
       with tf.GradientTape() as tape:
-        predictions = model(tf.expand_dims(sample_and_x[1], axis=0), training=True)
+        predictions = self.model(tf.expand_dims(sample_and_x[1], axis=0), training=True)
       sample = tf.expand_dims(sample_and_x[0], 0)
-      return tape.gradient(predictions, model.trainable_weights, output_gradients=sample)
+      return tape.gradient(predictions, self.model.trainable_weights, output_gradients=sample)
 
     #samples = self.orthgonal_initializer(predictions.shape) * x.shape[0]
     samples = self.normal_initializer(predictions.shape)
@@ -260,8 +262,8 @@ class FisherEngine(BaseEngine):
     self.accuracy(labels, predictions)
     self.loss_metric(loss)
 
-  def summarize(self):
-    self.optimizer.summarize()
+  def summarize(self, step):
+    self.optimizer.summarize(step)
 
 class CNNModel(tf.keras.Model):
   def __init__(self):
@@ -356,22 +358,19 @@ def crossentropy_hessian_fn(predictions):
   z = tf.sqrt(y)
   return (tf.linalg.diag(z) - tf.linalg.matmul(tf.expand_dims(y, 1), tf.expand_dims(z, 1), transpose_a=True))
 
-def make_optimizers(optimizer_name):
-  hp_lr = [0.0001, 0.0002, 0.0004, 0.0008, 0.0016, 0.0032, 0.0064, 0.0128]
-  hp_momentum = [0.0, 0.2, 0.6, 0.8, 0.9, 0.95, 0.99]
+def make_optimizer(model, optimizer_name, hparams):
+  #hp_lr = [0.0001, 0.0002, 0.0004, 0.0008, 0.0016, 0.0032, 0.0064, 0.0128]
+  #hp_momentum = [0.0, 0.2, 0.6, 0.8, 0.9, 0.95, 0.99]
   def sgd():
-    for lr in hp_lr:
-      yield (lambda model: tf.keras.optimizers.SGD(learning_rate=lr), {'learning_rate': lr})
+    return tf.keras.optimizers.SGD(learning_rate=hparams['learning_rate'])
   def sgdm():
-    for lr in hp_lr:
-      for momentum in hp_momentum:
-        yield (lambda model: tf.keras.optimizers.SGD(learning_rate=lr, momentum=momentum), {'learning_rate': lr, 'momentum': momentum})
+    return tf.keras.optimizers.SGD(learning_rate=hparams['learning_rate'], momentum=hparams['momentum'])
   def adam():
-    yield (lambda model: tf.keras.optimizers.Adam(), {})
+    return tf.keras.optimizers.Adam()
   def block_scalar():
-    yield (lambda model: FisherBlockScalarOptimizer(model.trainable_weights, fading=1.0), {})
+    return FisherBlockScalarOptimizer(model.trainable_weights, fading=1.0)
   def block_low_rank():
-    yield (lambda model: FisherBlockSpectralOptimizer(model.trainable_weights, fading=1.0, rank=32), {})
+    return FisherBlockSpectralOptimizer(model.trainable_weights, fading=1.0, rank=32)
   optimizers = {
     "sgd": sgd,
     "sgdm": sgdm,
@@ -379,9 +378,9 @@ def make_optimizers(optimizer_name):
     "block-scalar": block_scalar,
     "block-spectral": block_low_rank
   }
-  return optimizers[optimizer_name]
+  return optimizers[optimizer_name]()
 
-def make_engine(engine_name, model, loss_fn, accuracy, optimizer):
+def make_engine(engine_name, model, loss_fn, hessian_fn, accuracy, optimizer):
   if (engine_name == "default"):
     return DefaultEngine(model, loss_fn, accuracy, optimizer)
   elif (engine_name == "batch-fisher"):
@@ -389,75 +388,85 @@ def make_engine(engine_name, model, loss_fn, accuracy, optimizer):
   elif (engine_name == "fisher"):
     return FisherEngine(model, loss_fn, hessian_fn, accuracy, optimizer)
 
-EPOCHS = 100
-batch_size = 8
+def main():
+  parser = argparse.ArgumentParser(description='Process some integers.')
+  parser.add_argument('--engine', default='default')
+  parser.add_argument('--optimizer', default='sgdm')
+  parser.add_argument('--learning_rate', type=float, default=0.0001)
+  parser.add_argument('--momentum', type=float, default=0.99)
+  parser.add_argument('--batch_size', type=int, default=8)
+  parser.add_argument('--epochs', type=int, default=100)
+  parser.add_argument('--experiment_name')
+  args = parser.parse_args()
 
-(x_train, y_train), (x_test, y_test) = tf.keras.datasets.cifar10.load_data()
-x_train, x_test = x_train / 255.0, x_test / 255.0
-# Add a channels dimension
-#x_train = x_train[..., tf.newaxis].astype("float32")
-#x_test = x_test[..., tf.newaxis].astype("float32")
+  experiment_name = args.experiment_name
+  if experiment_name is None:
+    experiment_name = wandb.util.generate_id()
+  wandb.init(project="kalman-fisher", group=experiment_name,
+    config={
+      "engine": args.engine,
+      "optimizer": args.optimizer,
+      "batch_size": args.batch_size,
+      "learning_rate": args.learning_rate,
+      "momentum": args.momentum,
+    })
 
-train_ds = tf.data.Dataset.from_tensor_slices(
-    (x_train, y_train)).shuffle(10000).batch(batch_size).prefetch(tf.data.AUTOTUNE)
-test_ds = tf.data.Dataset.from_tensor_slices((x_test, y_test)).batch(batch_size).prefetch(tf.data.AUTOTUNE)
+  hparams = {
+    "learning_rate": args.learning_rate,
+    "momentum": args.momentum
+  }
 
-loss_fn = tf.keras.losses.SparseCategoricalCrossentropy(from_logits=True, reduction=tf.keras.losses.Reduction.SUM_OVER_BATCH_SIZE)
-hessian_fn = crossentropy_hessian_fn
-accuracy = tf.keras.metrics.SparseCategoricalAccuracy(name='accuracy')
+  (x_train, y_train), (x_test, y_test) = tf.keras.datasets.cifar10.load_data()
+  x_train, x_test = x_train / 255.0, x_test / 255.0
+  # Add a channels dimension
+  #x_train = x_train[..., tf.newaxis].astype("float32")
+  #x_test = x_test[..., tf.newaxis].astype("float32")
 
-optimizer_name = "block-spectral"
-engine_name = "fisher"
-#optimizer_name = "sgdm"
-#engine_name = "default"
+  train_ds = tf.data.Dataset.from_tensor_slices(
+      (x_train, y_train)).shuffle(10000).batch(args.batch_size).prefetch(tf.data.AUTOTUNE)
+  test_ds = tf.data.Dataset.from_tensor_slices((x_test, y_test)).batch(args.batch_size).prefetch(tf.data.AUTOTUNE)
 
-hp_optimizer = hp.HParam('optimizer', hp.Discrete(['sgdm', 'adam', 'block-scalar', 'block-spectral']))
-hp_engine = hp.HParam('engine', hp.Discrete(['default', 'batch-fisher', 'fisher']))
-hp_batch_size = hp.HParam('batch_size', hp.Discrete([1, 4, 8, 16, 32, 64]))
-
-optimizers = make_optimizers(optimizer_name)
-
-for optimizer, optimizer_params in optimizers():
-  print(optimizer_params)
-  log_dir = "logs/" + datetime.now().strftime("%Y%m%d-%H%M%S") + engine_name + optimizer_name + str(batch_size)
-
-  with tf.summary.create_file_writer(log_dir).as_default(step=0):
-    for param_key in optimizer_params:
-      tf.summary.text(param_key, str(optimizer_params[param_key]))
-    tf.summary.text('optimizer', optimizer_name)
-    tf.summary.text('engine', engine_name)
-    tf.summary.text('batch_size', str(batch_size))
+  loss_fn = tf.keras.losses.SparseCategoricalCrossentropy(from_logits=True, reduction=tf.keras.losses.Reduction.SUM_OVER_BATCH_SIZE)
+  hessian_fn = crossentropy_hessian_fn
+  accuracy = tf.keras.metrics.SparseCategoricalAccuracy(name='accuracy')
 
   #model = CNNModel()
   model = VGGModel()
   #model = tf.keras.applications.ResNet50(weights=None, classes=10, input_shape=x_train.shape[1:])
   model.build(x_train.shape)
-  engine = make_engine(engine_name, model, loss_fn, accuracy, optimizer(model))
 
-  for epoch in range(EPOCHS):
-    with tf.summary.create_file_writer(log_dir).as_default(step=epoch):
-      engine.reset_states()
-      print(
-        f'Step: {epoch}'
-      )
-      for x, labels in train_ds:
-        engine.train_step(x, labels)
-      print(
-        'Train '
-        f'Loss: {engine.loss_metric.result()}, '
-        f'Accuracy: {accuracy.result() * 100}, '
-      )
-      tf.summary.scalar("accuracy/train", engine.accuracy.result())
-      tf.summary.scalar("loss/train", engine.loss_metric.result())
-      engine.summarize()
+  optimizer = make_optimizer(model, args.optimizer, hparams)
+  engine = make_engine(args.engine, model, loss_fn, hessian_fn, accuracy, optimizer)
 
-      engine.reset_states()
-      for x, labels in test_ds:
-        engine.test_step(x, labels)
-      print(
-        'Test '
-        f'Loss: {engine.loss_metric.result()}, '
-        f'Accuracy: {accuracy.result() * 100}, '
-      )
-      tf.summary.scalar("accuracy/test", engine.accuracy.result())
-      tf.summary.scalar("loss/test", engine.loss_metric.result())
+  for epoch in range(args.epochs):
+    engine.reset_states()
+    print(
+      f'Step: {epoch}'
+    )
+    for x, labels in train_ds:
+      engine.train_step(x, labels)
+    print(
+      'Train '
+      f'Loss: {engine.loss_metric.result()}, '
+      f'Accuracy: {accuracy.result() * 100}, '
+    )
+    wandb.log({'accuracy/train': engine.accuracy.result()}, step=epoch)
+    wandb.log({'loss/train': engine.loss_metric.result()}, step=epoch)
+    engine.summarize(epoch)
+
+    engine.reset_states()
+    for x, labels in test_ds:
+      engine.test_step(x, labels)
+    print(
+      'Test '
+      f'Loss: {engine.loss_metric.result()}, '
+      f'Accuracy: {accuracy.result() * 100}, '
+    )
+    wandb.log({'accuracy/test': engine.accuracy.result()}, step=epoch)
+    wandb.log({'loss/test': engine.loss_metric.result()}, step=epoch)
+
+  wandb.finish()
+
+
+if __name__ == "__main__":
+  main()
