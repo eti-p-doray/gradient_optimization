@@ -56,13 +56,16 @@ class MLPModel(tf.keras.Model):
   def get_config(self):
     return {}
 
-  def sample_information(self, x, sample_fn):
-    with tf.GradientTape() as tape:
-      y_pred = self.call(x, training=True)
-    sample = self.sample_loss_hessian(y_pred, sample_fn(y_pred.shape))
-    fisher_sample = tape.gradient(y_pred, self.trainable_weights, output_gradients=sample)
-    information_scalars = [tf.zeros([1]) for weight in self.trainable_weights]
-    return fisher_sample, information_scalars
+  def sample_observations(self, observations, sample):
+    return self.sample_loss_hessian(observations, sample)
+
+  def fim_diagonal(self, x):
+    return [tf.zeros([1]) for weight in self.trainable_weights]
+
+  def trainable_weight_initializers(self):
+    for weight in self.trainable_weights:
+      fan_in, fan_out = compute_fans(weight.shape)
+      yield (weight, tf.cast((fan_in + fan_out) / 2.0, tf.float32))
 
   def call(self, x, training=False):
     x = self.flatten(x)
